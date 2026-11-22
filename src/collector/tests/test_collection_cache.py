@@ -40,6 +40,17 @@ def test_mismatched_order_files_disable_cache(tmp_path):
     assert cache.records == {}
 
 
+@pytest.mark.parametrize("progress", [{"schema_version": 2, "records": {}}, {"schema_version": 1, "records": []}, []])
+def test_unknown_progress_format_is_ignored(tmp_path, progress):
+    write_json(tmp_path / "progress.json", progress)
+    assert CollectionCache(tmp_path).progress == {}
+
+
+def test_expired_progress_is_dropped(tmp_path):
+    write_json(tmp_path / "progress.json", {"schema_version": 1, "records": {"1": {"checked_at": "2000-01-01T00:00:00Z", "auction": {}}}})
+    assert CollectionCache(tmp_path).progress == {}
+
+
 def test_eighteen_auction_stop_window():
     history = [str(number) for number in range(100, 0, -1)]
     window = ConsecutiveWindow(history, 18)

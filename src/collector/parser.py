@@ -1,5 +1,6 @@
 import json
 import sys
+import time
 from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from itertools import count
@@ -17,11 +18,18 @@ from utils.jsf import parse_partial_response
 from utils.site import CRONOGRAMA, INMUEBLES, ROWS, RemajuSite, polite_pause
 
 
+RETRY_DELAYS = (30.0, 120.0)
+TRANSIENT = (requests.ConnectionError, requests.Timeout)
+
+
 class Parser:
-    def __init__(self, site: RemajuSite, cache: Path, max_pages: int | None = None, baseline: CollectionCache | None = None, stop_window: int | None = None):
+    def __init__(self, site: RemajuSite, cache: Path, max_pages: int | None = None, baseline: CollectionCache | None = None, stop_window: int | None = None, deadline: float | None = None, clock: Callable[[], float] = time.monotonic, wait: Callable[[float], None] = time.sleep):
         self.site = site
         self.cache = cache
         self.max_pages = max_pages
+        self.deadline = deadline
+        self.clock = clock
+        self.wait = wait
         self.auctions: list[Auction] = []
         self.failures: list[dict[str, str]] = []
         self.pages_complete = False
@@ -41,6 +49,9 @@ class Parser:
                     self.auctions.append(reused)
                     self.reused += 1
                     self.save()
+                elif self.deadline is not None and self.clock() >= self.deadline:
+                    self.stop_reason = "time-limit"
+                    return self.auctions
                 else:
                     self.collect(card)
                 if self.window and self.window.observe(card.listing.numero_remate, reused is not None):
@@ -76,12 +87,7 @@ class Parser:
 
     def collect(self, card: Card) -> None:
         try:
-            auction = Auction(
-                numero_remate=card.listing.numero_remate,
-                list_data=card.listing,
-                detail=self.detail(card),
-                seguimiento=self.tracking(card),
-            )
+            auction = self.attempt(card)
         except (ValueError, requests.RequestException) as error:
             self.failures.append({"numero_remate": card.listing.numero_remate, "type": type(error).__name__, "message": diagnostic_error(error)})
             raise
@@ -89,6 +95,25 @@ class Parser:
         self.fetched += 1
         self.baseline.fetched(auction)
         self.save()
+
+    def attempt(self, card: Card) -> Auction:
+        for retry, delay in enumerate(RETRY_DELAYS):
+            try:
+                return self.fetch(card, reload=retry > 0)
+            except TRANSIENT as error:
+                self.site.trace.event("retry", "waiting", numero_remate=card.listing.numero_remate, error=type(error).__name__, message=diagnostic_error(error), delay_seconds=delay)
+                self.wait(delay)
+        return self.fetch(card, reload=True)
+
+    def fetch(self, card: Card, reload: bool) -> Auction:
+        if reload:
+            self.site.reload()
+        return Auction(
+            numero_remate=card.listing.numero_remate,
+            list_data=card.listing,
+            detail=self.detail(card),
+            seguimiento=self.tracking(card),
+        )
 
     def save(self) -> None:
         write_json(self.cache, [item.model_dump(mode="json") for item in self.auctions])
@@ -126,9 +151,12 @@ class Parser:
         }
 
 
-def collect(output: Path, mode: str, session: requests.Session | None = None, pause: Callable[[], None] = polite_pause, max_pages: int | None = None, page_size: int = ROWS, cache_dir: Path | None = None, cache_max_age_hours: int = 168, stop_window: int | None = None, baseline_dir: Path | None = None) -> dict[str, Any]:
+def collect(output: Path, mode: str, session: requests.Session | None = None, pause: Callable[[], None] = polite_pause, max_pages: int | None = None, page_size: int = ROWS, cache_dir: Path | None = None, cache_max_age_hours: int = 168, stop_window: int | None = None, baseline_dir: Path | None = None, time_limit_minutes: float | None = None, clock: Callable[[], float] = time.monotonic, wait: Callable[[float], None] = time.sleep) -> dict[str, Any]:
     if max_pages is not None and max_pages < 1:
         raise ValueError("max_pages must be at least 1")
+    if time_limit_minutes is not None and time_limit_minutes <= 0:
+        raise ValueError("time_limit_minutes must be positive")
+    deadline = clock() + time_limit_minutes * 60 if time_limit_minutes is not None else None
     if page_size not in {4, 12}:
         raise ValueError("page_size must be 4 or 12")
     if stop_window is not None and (stop_window < 2 or cache_dir is None):
@@ -144,7 +172,7 @@ def collect(output: Path, mode: str, session: requests.Session | None = None, pa
     parser: Parser | None = None
     try:
         with session or requests.Session() as http:
-            parser = Parser(RemajuSite(trace, http, pause, page_size), trace.directory / "auctions.json", limit, baseline, stop_window)
+            parser = Parser(RemajuSite(trace, http, pause, page_size), trace.directory / "auctions.json", limit, baseline, stop_window, deadline, clock, wait)
             parser.process()
             report.update(parser.report())
             if parser.stop_reason:

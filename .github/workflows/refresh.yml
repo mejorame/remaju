@@ -31,6 +31,7 @@ jobs:
       MAX_PAGES: ${{ inputs.max_pages }}
       STOP_WINDOW: ${{ inputs.stop_window }}
       CACHE_MAX_AGE_HOURS: ${{ inputs.refresh_all_details && '0' || '168' }}
+      TIME_LIMIT_MINUTES: '150'
       AWS_DEFAULT_REGION: auto
       AWS_ENDPOINT_URL: ${{ vars.R2_ENDPOINT }}
       AWS_REQUEST_CHECKSUM_CALCULATION: when_required
@@ -62,7 +63,7 @@ jobs:
         id: collect
         run: |
           set +e
-          uv run --no-sync python main.py collect --mode live --output "$RUNS" --page-size 12 --cache-dir "$(dirname "$GEOCODING_CACHE")/collector" --baseline-dir "$SITE" --cache-max-age-hours "$CACHE_MAX_AGE_HOURS" ${MAX_PAGES:+--max-pages "$MAX_PAGES"} ${STOP_WINDOW:+--stop-window "$STOP_WINDOW"} | tee report.json
+          uv run --no-sync python main.py collect --mode live --output "$RUNS" --page-size 12 --cache-dir "$(dirname "$GEOCODING_CACHE")/collector" --baseline-dir "$SITE" --cache-max-age-hours "$CACHE_MAX_AGE_HOURS" --time-limit-minutes "$TIME_LIMIT_MINUTES" ${MAX_PAGES:+--max-pages "$MAX_PAGES"} ${STOP_WINDOW:+--stop-window "$STOP_WINDOW"} | tee report.json
           code=${PIPESTATUS[0]}
           run_id=$(jq -er '.run_id | select(type == "string" and test("^[A-Za-z0-9_-]{1,80}$"))' report.json) || exit 4
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
@@ -84,7 +85,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: uv run --no-sync python storage.py publish --site "$SITE" --public "${DATA#s3://}"
       - name: Save caches
-        if: ${{ always() && steps.collect.outputs.run_id != '' }}
+        if: ${{ always() }}
         uses: actions/cache/save@v6.1.0
         with:
           path: var/cache

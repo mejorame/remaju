@@ -64,10 +64,11 @@ class Collect(Action):
     cache_max_age_hours: int = arg(168, help="Refresh unchanged details after this many hours; 0 forces fresh details")
     baseline_dir: Path | None = arg(None, help="Restore the baseline from verified manifest.json, ids.txt and history.json")
     stop_window: int | None = arg(None, help="Experimental: stop at this many unchanged consecutive historical IDs; output cannot be published")
+    time_limit_minutes: float | None = arg(None, help="Stop fetching new details after this many minutes; the run stays partial and fetched details are kept for the next run")
 
     @override
     def execute(self) -> Any:
-        result = collect(self.output, self.mode, max_pages=self.max_pages, page_size=self.page_size, cache_dir=self.cache_dir, cache_max_age_hours=self.cache_max_age_hours, stop_window=self.stop_window, baseline_dir=self.baseline_dir)
+        result = collect(self.output, self.mode, max_pages=self.max_pages, page_size=self.page_size, cache_dir=self.cache_dir, cache_max_age_hours=self.cache_max_age_hours, stop_window=self.stop_window, baseline_dir=self.baseline_dir, time_limit_minutes=self.time_limit_minutes)
         if result["status"] == "failed":
             raise CommandFailed(result, 4)
         return result

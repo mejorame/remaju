@@ -30,6 +30,10 @@ class ConsecutiveWindow:
         return len(self.matched) == self.size
 
 
+def checked(record: dict[str, Any]) -> datetime:
+    return datetime.fromisoformat(record["checked_at"].replace("Z", "+00:00"))
+
+
 class CollectionCache:
     def __init__(self, directory: Path | None, max_age_hours: int = 168):
         if max_age_hours < 0:
@@ -38,9 +42,8 @@ class CollectionCache:
         self.max_age = timedelta(hours=max_age_hours)
         self.records: dict[str, Any] = {}
         self.order: list[str] = []
+        self.progress: dict[str, Any] = {}
         self.checked_at: dict[str, str] = {}
-        self.positions: dict[str, int] = {}
-        self.last_position = -1
         if directory is None:
             return
         snapshot = directory / "auctions.json"
@@ -53,7 +56,18 @@ class CollectionCache:
             if cached.get("schema_version") == 1 and cached.get("order") == order and len(order) == len(set(order)) and all(number.isdigit() for number in order):
                 self.records = cached["records"]
                 self.order = order
-                self.positions = {number: position for position, number in enumerate(order)}
+        self.progress = self.load_progress(directory / "progress.json")
+
+    def load_progress(self, path: Path) -> dict[str, Any]:
+        if not path.exists():
+            return {}
+        saved = read_json(path)
+        if not isinstance(saved, dict) or saved.get("schema_version") != 1 or not isinstance(saved.get("records"), dict):
+            return {}
+        return {number: record for number, record in saved["records"].items() if self.fresh(record)}
+
+    def fresh(self, record: dict[str, Any]) -> bool:
+        return timedelta(0) <= datetime.now(timezone.utc) - checked(record) < self.max_age
 
     def use_published(self, root: Path | None) -> None:
         if root is None or not (root / "manifest.json").exists():
@@ -70,28 +84,27 @@ class CollectionCache:
         if len(order) != len(set(order)) or set(order) != set(records):
             raise ValueError("Published IDs do not match history")
         self.records, self.order = records, order
-        self.positions = {number: position for position, number in enumerate(order)}
+
+    def record(self, number: str) -> dict[str, Any] | None:
+        candidates = [record for record in (self.records.get(number), self.progress.get(number)) if record is not None]
+        return max(candidates, key=checked, default=None)
 
     def reuse(self, card: Card) -> Auction | None:
-        position = self.positions.get(card.listing.numero_remate)
-        if position is not None:
-            in_order = position > self.last_position
-            self.last_position = max(self.last_position, position)
-            if not in_order:
-                return None
-        record = self.records.get(card.listing.numero_remate)
-        if record is None:
+        record = self.record(card.listing.numero_remate)
+        if record is None or not self.fresh(record):
             return None
         auction = Auction.model_validate(record["auction"])
-        checked = datetime.fromisoformat(record["checked_at"].replace("Z", "+00:00"))
-        age = datetime.now(timezone.utc) - checked
-        if not timedelta(0) <= age < self.max_age or auction.list_data != card.listing:
+        if auction.list_data != card.listing:
             return None
         self.checked_at[auction.numero_remate] = record["checked_at"]
         return auction.model_copy(deep=True)
 
     def fetched(self, auction: Auction) -> None:
         self.checked_at[auction.numero_remate] = utc_now()
+        if self.directory is None:
+            return
+        self.progress[auction.numero_remate] = {"checked_at": self.checked_at[auction.numero_remate], "auction": auction.model_dump(mode="json")}
+        write_json(self.directory / "progress.json", {"schema_version": 1, "records": self.progress})
 
     def save(self, auctions: list[Auction]) -> None:
         if self.directory is None:

@@ -162,6 +162,9 @@ class RemajuSite:
             raise ValueError("No page to leave")
         url, interaction = self.exit
         self.post(url, interaction)
+        self.reload()
+
+    def reload(self) -> None:
         self.exit = None
         previous = self.cards
         self.open_listing()

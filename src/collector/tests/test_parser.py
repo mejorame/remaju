@@ -5,7 +5,7 @@ import pytest
 import requests
 
 from parser import collect, replay
-from utils.archive import read_json, write_json
+from utils.archive import read_json, utc_now, write_json
 from utils.debugger import Trace
 from utils.extract import LIST_ID, TABS_ID, cards, list_cards
 from utils.jsf import VIEW_STATE, form_session
@@ -199,7 +199,7 @@ def test_failed_detail_stops_collection_and_preserves_progress(tmp_path, list_ht
 
 
 @pytest.mark.parametrize("kind", ["redirect", "challenge", "timeout", "http-error"])
-def test_request_error_stops_without_recovery_and_preserves_baseline(tmp_path, source, monkeypatch, kind):
+def test_request_error_stops_after_retrying_transient_errors_and_preserves_baseline(tmp_path, source, monkeypatch, kind):
     monkeypatch.setattr("utils.site.advertised_total", lambda _: 4)
     cache = tmp_path / "cache"
     collect(tmp_path / "runs", "live", source, lambda: None, cache_dir=cache)
@@ -221,14 +221,16 @@ def test_request_error_stops_without_recovery_and_preserves_baseline(tmp_path, s
         return original(method, url, **kwargs)
 
     source.request = fail
-    report = collect(tmp_path / "runs", "live", source, lambda: None, cache_dir=cache, cache_max_age_hours=0)
+    delays = []
+    report = collect(tmp_path / "runs", "live", source, lambda: None, cache_dir=cache, cache_max_age_hours=0, wait=delays.append)
     assert report["status"] == "failed"
     assert report["count"] == 0
     assert report["details_complete"] is False
     assert len(report["failures"]) == 1
     assert report["failures"][0]["numero_remate"] == "22096"
     assert source.calls[-1] == ("GET", DETAIL_URL, "")
-    assert len(source.calls) == 4
+    assert len(source.calls) == (12 if kind == "timeout" else 4)
+    assert delays == ([30.0, 120.0] if kind == "timeout" else [])
     assert {path.name: path.read_bytes() for path in cache.iterdir()} == baseline
     run_dir = tmp_path / "runs" / report["run_id"]
     assert read_json(run_dir / "run.json") == report
@@ -311,9 +313,10 @@ def test_force_refresh_and_changed_summaries_fetch_again(tmp_path, source, monke
     collect(tmp_path / "runs", "live", source, lambda: None, cache_dir=cache)
     forced = collect(tmp_path / "runs", "live", source, lambda: None, cache_dir=cache, cache_max_age_hours=0)
     assert forced["details_fetched"] == 4
-    cached = read_json(cache / "auctions.json")
-    cached["records"]["22096"]["auction"]["list_data"]["descripcion"] = "different"
-    write_json(cache / "auctions.json", cached)
+    for name in ("auctions.json", "progress.json"):
+        cached = read_json(cache / name)
+        cached["records"]["22096"]["auction"]["list_data"]["descripcion"] = "different"
+        write_json(cache / name, cached)
     changed = collect(tmp_path / "runs", "live", source, lambda: None, cache_dir=cache)
     assert changed["details_fetched"] == 1
     assert changed["details_reused"] == 3
@@ -336,14 +339,88 @@ def test_unexpected_page_size_cannot_skip_records(tmp_path, source):
     assert "unexpected page size" in report["error"]["message"]
 
 
-def test_reordered_auctions_force_detail_refresh(tmp_path, source, monkeypatch):
+def test_reordered_auctions_reuse_cached_details(tmp_path, source, monkeypatch):
     monkeypatch.setattr("utils.site.advertised_total", lambda _: 4)
     cache = tmp_path / "cache"
     collect(tmp_path / "runs", "live", source, lambda: None, cache_dir=cache)
-    monkeypatch.setattr("utils.extract.cards", lambda xml: [cards(xml)[i] for i in [2, 0, 1, 3]])
+    monkeypatch.setattr("utils.extract.cards", lambda xml: [cards(xml)[i] for i in [3, 0, 1, 2]])
     report = collect(tmp_path / "runs", "live", source, lambda: None, cache_dir=cache)
-    assert report["details_fetched"] == 2
+    assert report["status"] == "complete"
+    assert report["details_fetched"] == 0
+    assert report["details_reused"] == 4
+
+
+def test_details_from_a_failed_run_are_reused_by_the_next_run(tmp_path, list_html, list_xml, detail_html, inmuebles_xml, cronograma_xml, monkeypatch):
+    monkeypatch.setattr("utils.site.advertised_total", lambda _: 4)
+    cache = tmp_path / "cache"
+    broken = Source(list_html, list_xml, detail_html, inmuebles_xml, cronograma_xml, {"formBuscarRemateExterno:listaRemate:2:j_idt169"})
+    failed = collect(tmp_path / "runs", "live", broken, lambda: None, cache_dir=cache)
+    assert failed["status"] == "failed"
+    assert failed["details_fetched"] == 2
+    assert not (cache / "auctions.json").exists()
+    assert sorted(read_json(cache / "progress.json")["records"]) == ["22095", "22096"]
+    broken.broken = frozenset()
+    report = collect(tmp_path / "runs", "live", broken, lambda: None, cache_dir=cache)
+    assert report["status"] == "complete"
     assert report["details_reused"] == 2
+    assert report["details_fetched"] == 2
+    assert report["detail_checked_at"]["22096"] == failed["detail_checked_at"]["22096"]
+
+
+def test_progress_newer_than_published_data_is_reused(tmp_path, source, monkeypatch):
+    monkeypatch.setattr("utils.site.advertised_total", lambda _: 4)
+    report = collect(tmp_path / "runs", "live", source, lambda: None)
+    auctions = read_json(tmp_path / "runs" / report["run_id"] / "auctions.json")
+    site = tmp_path / "site"
+    publish_run({**report, "auctions": auctions}, site)
+    cache = tmp_path / "cache"
+    newer = utc_now()
+    write_json(cache / "progress.json", {"schema_version": 1, "records": {"22096": {"checked_at": newer, "auction": auctions[0]}, "1": {"checked_at": "2000-01-01T00:00:00Z", "auction": auctions[1]}}})
+    source.calls.clear()
+    resumed = collect(tmp_path / "runs", "live", source, lambda: None, cache_dir=cache, baseline_dir=site)
+    assert resumed["details_reused"] == 4
+    assert resumed["detail_checked_at"]["22096"] == newer
+    assert resumed["detail_checked_at"]["22095"] == report["detail_checked_at"]["22095"]
+    assert len(source.calls) == 2
+
+
+def test_time_limit_stops_before_fetching_and_keeps_progress(tmp_path, source, monkeypatch):
+    monkeypatch.setattr("utils.site.advertised_total", lambda _: 4)
+    cache = tmp_path / "cache"
+    ticks = iter(range(0, 1000, 30))
+    report = collect(tmp_path / "runs", "live", source, lambda: None, cache_dir=cache, time_limit_minutes=1.5, clock=lambda: next(ticks))
+    assert report["status"] == "partial"
+    assert report["scope"] == "partial"
+    assert report["stop_reason"] == "time-limit"
+    assert report["count"] == 2
+    assert report["details_complete"] is True
+    assert sorted(read_json(cache / "progress.json")["records"]) == ["22095", "22096"]
+    resumed = collect(tmp_path / "runs", "live", source, lambda: None, cache_dir=cache, time_limit_minutes=1.5, clock=lambda: 0)
+    assert resumed["status"] == "complete"
+    assert resumed["details_reused"] == 2
+    assert resumed["details_fetched"] == 2
+
+
+def test_dropped_connection_is_retried_from_a_reloaded_listing(tmp_path, source, monkeypatch):
+    monkeypatch.setattr("utils.site.advertised_total", lambda _: 4)
+    original = source.request
+    dropped = []
+
+    def drop_once(method, url, **kwargs):
+        if method == "POST" and url == LIST_URL and (kwargs.get("data") or {}).get("javax.faces.source", "").endswith("1:j_idt169") and not dropped:
+            dropped.append(url)
+            raise requests.ConnectionError("Remote end closed connection without response")
+        return original(method, url, **kwargs)
+
+    source.request = drop_once
+    delays = []
+    report = collect(tmp_path, "live", source, lambda: None, wait=delays.append)
+    assert report["status"] == "complete"
+    assert report["details_fetched"] == 4
+    assert report["failures"] == []
+    assert delays == [30.0]
+    events = (tmp_path / report["run_id"] / "events.jsonl").read_text()
+    assert '"action": "retry"' in events
 
 
 def test_removed_auction_does_not_block_reuse_of_later_ones(tmp_path, source, monkeypatch):
@@ -362,10 +439,11 @@ def test_expired_cache_is_refreshed(tmp_path, source, monkeypatch):
     monkeypatch.setattr("utils.site.advertised_total", lambda _: 4)
     cache = tmp_path / "cache"
     collect(tmp_path / "runs", "live", source, lambda: None, cache_dir=cache)
-    baseline = read_json(cache / "auctions.json")
-    for record in baseline["records"].values():
-        record["checked_at"] = "2000-01-01T00:00:00Z"
-    write_json(cache / "auctions.json", baseline)
+    for name in ("auctions.json", "progress.json"):
+        cached = read_json(cache / name)
+        for record in cached["records"].values():
+            record["checked_at"] = "2000-01-01T00:00:00Z"
+        write_json(cache / name, cached)
     report = collect(tmp_path / "runs", "live", source, lambda: None, cache_dir=cache)
     assert report["details_fetched"] == 4
     assert report["details_reused"] == 0
