@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       max_pages:
-        description: Listing pages to collect (4 auctions each). Empty collects everything; capped runs do not publish.
+        description: Listing pages to collect (12 auctions each). Empty collects everything; capped runs do not publish.
         default: ''
         required: false
       stop_window:
@@ -63,7 +63,7 @@ jobs:
         id: collect
         run: |
           set +e
-          uv run --no-sync python main.py collect --mode live --output "$RUNS" --page-size 4 --cache-dir "$(dirname "$GEOCODING_CACHE")/collector" --baseline-dir "$SITE" --cache-max-age-hours "$CACHE_MAX_AGE_HOURS" --time-limit-minutes "$TIME_LIMIT_MINUTES" ${MAX_PAGES:+--max-pages "$MAX_PAGES"} ${STOP_WINDOW:+--stop-window "$STOP_WINDOW"} | tee report.json
+          uv run --no-sync python main.py collect --mode live --output "$RUNS" --page-size 12 --cache-dir "$(dirname "$GEOCODING_CACHE")/collector" --baseline-dir "$SITE" --cache-max-age-hours "$CACHE_MAX_AGE_HOURS" --time-limit-minutes "$TIME_LIMIT_MINUTES" ${MAX_PAGES:+--max-pages "$MAX_PAGES"} ${STOP_WINDOW:+--stop-window "$STOP_WINDOW"} | tee report.json
           code=${PIPESTATUS[0]}
           run_id=$(jq -er '.run_id | select(type == "string" and test("^[A-Za-z0-9_-]{1,80}$"))' report.json) || exit 4
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"

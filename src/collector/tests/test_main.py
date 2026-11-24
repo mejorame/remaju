@@ -60,8 +60,8 @@ def test_failed_collection_returns_nonzero_with_machine_readable_report(capsys, 
     assert json.loads(out) == report
 
 
-@pytest.mark.parametrize("options, expected", [((), 4), (("--page-size", "4"), 4), (("--page-size", "12"), 12)])
-def test_collection_defaults_to_four_auctions_but_accepts_explicit_page_size(capsys, tmp_path, monkeypatch, options, expected):
+@pytest.mark.parametrize("options, expected", [((), 12), (("--page-size", "4"), 4), (("--page-size", "12"), 12)])
+def test_collection_defaults_to_twelve_auctions_but_accepts_explicit_page_size(capsys, tmp_path, monkeypatch, options, expected):
     collector = Mock(return_value={"run_id": "r1", "status": "partial"})
     monkeypatch.setattr("main.collect", collector)
     code, _, _ = invoke(capsys, "collect", "--mode", "live", "--output", str(tmp_path), *options)
