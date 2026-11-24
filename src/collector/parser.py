@@ -16,6 +16,7 @@ from utils.collection_cache import CollectionCache, ConsecutiveWindow
 from utils.debugger import Trace, diagnostic_error
 from utils.jsf import parse_partial_response
 from utils.site import CRONOGRAMA, INMUEBLES, ROWS, RemajuSite, polite_pause
+from utils.verification import VerificationRequired
 
 
 RETRY_DELAYS = (30.0, 120.0)
@@ -183,10 +184,13 @@ def collect(output: Path, mode: str, session: requests.Session | None = None, pa
                 baseline.save(parser.auctions)
     except (ValueError, OSError, requests.RequestException) as error:
         if parser is not None:
-            parser.stop_reason = "collection-error"
+            parser.stop_reason = "source-blocked" if isinstance(error, VerificationRequired) else "collection-error"
             report.update(parser.report())
         report["status"] = "failed"
         report["error"] = {"type": type(error).__name__, "message": diagnostic_error(error), "response": trace.last_response}
+        if isinstance(error, VerificationRequired):
+            report["verification"] = error.verification
+            report["error"]["code"] = "SOURCE_BLOCKED"
         trace.event("collection", "failed", error=report["error"], failures=report.get("failures", []))
         print(json.dumps({"run_id": run_id, "status": "failed", "error": report["error"], "failures": report.get("failures", [])}, ensure_ascii=False), file=sys.stderr)
     finally:

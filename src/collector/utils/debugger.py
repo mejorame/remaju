@@ -8,6 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 import requests
 
 from .archive import utc_now
+from .verification import VerificationRequired, detect_verification
 
 
 def redact(text: str) -> str:
@@ -18,8 +19,7 @@ def redact(text: str) -> str:
 
 
 def challenge(body: str) -> bool:
-    lowered = body.lower()
-    return any(marker in lowered for marker in ("h-captcha", "hcaptcha", "radware", "g-recaptcha", "cf-turnstile", "/cdn-cgi/challenge-platform/"))
+    return detect_verification(body) is not None
 
 
 def diagnostic_url(url: str) -> str:
@@ -53,21 +53,23 @@ class Trace:
             response = session.request(method, url, data=data, headers={"Faces-Request": "partial/ajax"} if method == "POST" else {}, timeout=(10, 30), allow_redirects=False)
             body = response.text
             body_file = f"{sequence:06d}-{action}.txt"
-            (self.directory / body_file).write_text(redact(body), encoding="utf-8")
             headers = getattr(response, "headers", {})
+            verification = detect_verification(body, response.status_code, headers.get("Location", ""))
+            captured = json.dumps({"verification": verification}) if verification else redact(body)
+            (self.directory / body_file).write_text(captured, encoding="utf-8")
             self.last_response = {
                 "sequence": sequence, "action": action, "method": method,
                 "url": diagnostic_url(url), "status": response.status_code,
                 "location": diagnostic_url(headers.get("Location", "")),
                 "content_type": headers.get("Content-Type", ""),
-                "challenge_detected": challenge(body), "body_file": body_file,
+                "challenge_detected": verification is not None, "verification": verification, "body_file": body_file,
             }
             self.event(action, "end", **{key: value for key, value in self.last_response.items() if key != "action"}, elapsed_ms=round((time.monotonic() - started) * 1000))
+            if verification is not None:
+                raise VerificationRequired(verification)
             response.raise_for_status()
             if 300 <= response.status_code < 400:
                 raise ValueError("Unexpected redirect")
-            if challenge(body):
-                raise ValueError("Source challenge detected")
             return body
         except Exception as error:
             self.event(action, "failed", sequence=sequence, error=type(error).__name__, message=diagnostic_error(error), response=self.last_response, elapsed_ms=round((time.monotonic() - started) * 1000))

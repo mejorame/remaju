@@ -263,6 +263,36 @@ def test_challenge_fails_run_without_auctions(tmp_path):
     assert not (tmp_path / report["run_id"] / "auctions.json").exists()
 
 
+@pytest.mark.parametrize("status, body, location, provider", [
+    (403, "Acceso denegado", "", "unknown"),
+    (302, "Redirect", "https://validate.perfdrive.com/?token=private-token", "perfdrive"),
+    (200, '<div class="h-captcha"></div>', "", "hcaptcha"),
+])
+def test_blocked_listing_reports_verification_and_stops_without_retry(tmp_path, source, status, body, location, provider):
+    original = source.request
+
+    def block(method, url, **kwargs):
+        result = original(method, url, **kwargs)
+        if method == "POST":
+            result = requests.Response()
+            result.status_code = status
+            result._content = body.encode()
+            result.headers["Location"] = location
+        return result
+
+    source.request = block
+    delays = []
+    report = collect(tmp_path, "live", source, lambda: None, wait=delays.append)
+    assert report["status"] == "failed"
+    assert report["stop_reason"] == "source-blocked"
+    assert report["error"]["code"] == "SOURCE_BLOCKED"
+    assert report["verification"]["provider"] == provider
+    assert report["count"] == 0
+    assert len(source.calls) == 2
+    assert delays == []
+    assert read_json(tmp_path / report["run_id"] / "run.json") == report
+
+
 def test_replay_fixture_is_not_publishable(sample_data_dir):
     result = replay(sample_data_dir)
     assert result["count"] == 4

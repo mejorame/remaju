@@ -1,0 +1,33 @@
+name: Browser verification probe (no publishing)
+on:
+  workflow_call:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: src/collector
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: false
+      - run: uv sync --locked --group browser
+      - run: uv run --no-sync playwright install --with-deps chromium
+      - name: Inspect normal browser verification and pagination
+        timeout-minutes: 5
+        run: uv run --no-sync python browser_probe.py --output "$GITHUB_WORKSPACE/var/browser-probe.json"
+      - name: Upload verification metadata without browser state
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: browser-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: var/browser-probe.json
+          retention-days: 30
+          if-no-files-found: warn

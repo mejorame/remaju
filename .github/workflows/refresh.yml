@@ -27,6 +27,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     environment: production
+    outputs:
+      source_blocked: ${{ steps.collect.outputs.source_blocked }}
     env:
       MAX_PAGES: ${{ inputs.max_pages }}
       STOP_WINDOW: ${{ inputs.stop_window }}
@@ -68,7 +70,11 @@ jobs:
           run_id=$(jq -er '.run_id | select(type == "string" and test("^[A-Za-z0-9_-]{1,80}$"))' report.json) || exit 4
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "publish=$(jq -r '.status == "complete"' report.json)" >> "$GITHUB_OUTPUT"
-          jq '{status, scope, count, advertised_total, page_size, details_fetched, details_reused, stop_reason, matched_window, pages_complete, details_complete, failures, error}' report.json
+          echo "source_blocked=$(jq -r '.error.code == "SOURCE_BLOCKED"' report.json)" >> "$GITHUB_OUTPUT"
+          jq '{status, scope, count, advertised_total, page_size, details_fetched, details_reused, stop_reason, matched_window, pages_complete, details_complete, failures, verification, error}' report.json
+          if jq -e '.error.code == "SOURCE_BLOCKED"' report.json >/dev/null; then
+            jq -r '"### Source verification required\n\nProvider: **\(.verification.provider)**\n\nType: **\(.verification.kind)**\n\nCollection stopped without retrying or publishing. A separate browser-only diagnostic will run."' report.json >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ "$code" -eq 0 ] && [ -z "$MAX_PAGES$STOP_WINDOW" ] && [ "$(jq -r '.status' report.json)" != complete ]; then
             exit 4
           fi
@@ -98,3 +104,7 @@ jobs:
           path: var/runs/${{ steps.collect.outputs.run_id }}
           retention-days: 30
           if-no-files-found: error
+  inspect-verification:
+    needs: refresh
+    if: ${{ always() && github.ref == 'refs/heads/main' && needs.refresh.outputs.source_blocked == 'true' }}
+    uses: ./.github/workflows/browser-probe.yml
